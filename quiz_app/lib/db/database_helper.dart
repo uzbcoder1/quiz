@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'package:postgres/postgres.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class User {
   String id;
@@ -27,7 +29,7 @@ class User {
       'id': id,
       'name': name,
       'email': email,
-      'imagePath': imagePath,
+      'image_path': imagePath,
       'phone': phone,
       'level': level,
       'coins': coins,
@@ -37,14 +39,14 @@ class User {
 
   factory User.fromMap(Map<String, dynamic> map) {
     return User(
-      id: map['id'],
-      name: map['name'],
-      email: map['email'],
-      imagePath: map['imagePath'],
+      id: map['id'].toString(),
+      name: map['name'] ?? '',
+      email: map['email'] ?? '',
+      imagePath: map['image_path'],
       phone: map['phone'],
-      level: map['level'],
-      coins: map['coins'],
-      diamonds: map['diamonds'],
+      level: map['level'] ?? 1,
+      coins: map['coins'] ?? 0,
+      diamonds: map['diamonds'] ?? 0,
     );
   }
 }
@@ -73,27 +75,216 @@ class Question {
   Map<String, dynamic> toMap() {
     return {
       'id': id,
-      'categoryId': categoryId,
-      'questionText': questionText,
-      'optionA': optionA,
-      'optionB': optionB,
-      'optionC': optionC,
-      'optionD': optionD,
-      'correctOption': correctOption,
+      'category_id': categoryId,
+      'question_text': questionText,
+      'option_a': optionA,
+      'option_b': optionB,
+      'option_c': optionC,
+      'option_d': optionD,
+      'correct_option': correctOption,
     };
   }
 
   factory Question.fromMap(Map<String, dynamic> map) {
     return Question(
       id: map['id'],
-      categoryId: map['categoryId'],
-      questionText: map['questionText'],
-      optionA: map['optionA'],
-      optionB: map['optionB'],
-      optionC: map['optionC'],
-      optionD: map['optionD'],
-      correctOption: map['correctOption'],
+      categoryId: map['category_id'],
+      questionText: map['question_text'],
+      optionA: map['option_a'],
+      optionB: map['option_b'],
+      optionC: map['option_c'],
+      optionD: map['option_d'],
+      correctOption: map['correct_option'],
     );
+  }
+}
+
+class DatabaseHelper {
+  static final DatabaseHelper instance = DatabaseHelper._init();
+  DatabaseHelper._init();
+
+  Connection? _connection;
+  User? currentUser;
+
+  Future<Connection> get connection async {
+    if (_connection != null) return _connection!;
+
+    _connection = await Connection.open(
+      Endpoint(
+        host: dotenv.get('DB_HOST'),
+        port: int.parse(dotenv.get('DB_PORT')),
+        database: dotenv.get('DB_NAME'),
+        username: dotenv.get('DB_USER'),
+        password: dotenv.get('DB_PASSWORD'),
+      ),
+      settings: const ConnectionSettings(sslMode: SslMode.disable),
+    );
+
+    await _createTables();
+    return _connection!;
+  }
+
+  Future<void> initDB() async {
+    try {
+      await connection;
+      // Load current user locally to keep session
+      final prefs = await SharedPreferences.getInstance();
+      final userJson = prefs.getString('current_user');
+      if (userJson != null) {
+        currentUser = User.fromMap(json.decode(userJson));
+      }
+    } catch (e) {
+      print("DB Init Error: $e");
+    }
+  }
+
+  Future<void> _createTables() async {
+    final conn = await connection;
+    await conn.execute('''
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        email TEXT UNIQUE,
+        image_path TEXT,
+        phone TEXT,
+        level INTEGER DEFAULT 1,
+        coins INTEGER DEFAULT 0,
+        diamonds INTEGER DEFAULT 0
+      )
+    ''');
+    await conn.execute('''
+      CREATE TABLE IF NOT EXISTS questions (
+        id SERIAL PRIMARY KEY,
+        category_id INTEGER,
+        question_text TEXT,
+        option_a TEXT,
+        option_b TEXT,
+        option_c TEXT,
+        option_d TEXT,
+        correct_option CHAR(1)
+      )
+    ''');
+  }
+
+  Future<bool> login(String email, String password) async {
+    final conn = await connection;
+    final result = await conn.execute(
+      Sql.named('SELECT * FROM users WHERE email = @email'),
+      parameters: {'email': email},
+    );
+
+    if (result.isNotEmpty) {
+      final row = result.first.toColumnMap();
+      currentUser = User.fromMap(row);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('current_user', json.encode(currentUser!.toMap()));
+      return true;
+    }
+    return false;
+  }
+
+  Future<bool> signup(String name, String email, String password) async {
+    try {
+      final conn = await connection;
+      final id = DateTime.now().millisecondsSinceEpoch.toString();
+      await conn.execute(
+        Sql.named('INSERT INTO users (id, name, email) VALUES (@id, @name, @email)'),
+        parameters: {'id': id, 'name': name, 'email': email},
+      );
+
+      return await login(email, password);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  Future<void> logout() async {
+    currentUser = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('current_user');
+  }
+
+  Future<void> updateUser(User user) async {
+    final conn = await connection;
+    await conn.execute(
+      Sql.named('''
+        UPDATE users SET
+        name = @name, image_path = @img, phone = @phone,
+        level = @lvl, coins = @coins, diamonds = @dia
+        WHERE email = @email
+      '''),
+      parameters: {
+        'name': user.name,
+        'img': user.imagePath,
+        'phone': user.phone,
+        'lvl': user.level,
+        'coins': user.coins,
+        'dia': user.diamonds,
+        'email': user.email,
+      },
+    );
+    currentUser = user;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('current_user', json.encode(user.toMap()));
+  }
+
+  List<Category> getCategories() {
+    return [
+      Category(id: 1, name: 'Sport', totalQuestions: 10, iconName: 'sports_soccer'),
+      Category(id: 2, name: 'Ilm-fan', totalQuestions: 10, iconName: 'science'),
+      Category(id: 3, name: 'Tarix', totalQuestions: 10, iconName: 'account_balance'),
+      Category(id: 4, name: 'Kinolar', totalQuestions: 10, iconName: 'movie'),
+      Category(id: 5, name: 'Musiqa', totalQuestions: 10, iconName: 'music_note'),
+      Category(id: 6, name: 'Umumiy', totalQuestions: 10, iconName: 'help'),
+    ];
+  }
+
+  Future<List<Question>> getAllQuestions() async {
+    final conn = await connection;
+    final result = await conn.execute('SELECT * FROM questions ORDER BY id DESC');
+    return result.map((row) => Question.fromMap(row.toColumnMap())).toList();
+  }
+
+  Future<List<Question>> getQuestionsForCategory(int categoryId) async {
+    final conn = await connection;
+    final result = await conn.execute(
+      Sql.named('SELECT * FROM questions WHERE category_id = @catId'),
+      parameters: {'catId': categoryId},
+    );
+    return result.map((row) => Question.fromMap(row.toColumnMap())).toList();
+  }
+
+  Future<void> addQuestion(Question q) async {
+    final conn = await connection;
+    await conn.execute(
+      Sql.named('''
+        INSERT INTO questions (category_id, question_text, option_a, option_b, option_c, option_d, correct_option)
+        VALUES (@cat, @txt, @a, @b, @c, @d, @cor)
+      '''),
+      parameters: {
+        'cat': q.categoryId,
+        'txt': q.questionText,
+        'a': q.optionA,
+        'b': q.optionB,
+        'c': q.optionC,
+        'd': q.optionD,
+        'cor': q.correctOption,
+      },
+    );
+  }
+
+  Future<void> deleteQuestion(int id) async {
+    final conn = await connection;
+    await conn.execute(
+      Sql.named('DELETE FROM questions WHERE id = @id'),
+      parameters: {'id': id},
+    );
+  }
+
+  Future<List<User>> getAllUsers() async {
+    final conn = await connection;
+    final result = await conn.execute('SELECT * FROM users ORDER BY level DESC');
+    return result.map((row) => User.fromMap(row.toColumnMap())).toList();
   }
 }
 
@@ -109,159 +300,4 @@ class Category {
     required this.totalQuestions,
     required this.iconName,
   });
-}
-
-class DatabaseHelper {
-  static final DatabaseHelper instance = DatabaseHelper._init();
-  DatabaseHelper._init();
-
-  SharedPreferences? _prefs;
-  User? currentUser;
-  List<Question> _allQuestions = [];
-
-  Future<void> initDB() async {
-    _prefs = await SharedPreferences.getInstance();
-
-    // Load current user if logged in
-    final userJson = _prefs?.getString('current_user');
-    if (userJson != null) {
-      currentUser = User.fromMap(json.decode(userJson));
-    }
-
-    // Load questions from storage or use defaults
-    final questionsJson = _prefs?.getString('questions');
-    if (questionsJson != null) {
-      Iterable l = json.decode(questionsJson);
-      _allQuestions = List<Question>.from(l.map((model) => Question.fromMap(model)));
-    } else {
-      _allQuestions = _defaultQuestions;
-      await _saveQuestions();
-    }
-  }
-
-  Future<void> _saveQuestions() async {
-    final String encodedData = json.encode(_allQuestions.map((q) => q.toMap()).toList());
-    await _prefs?.setString('questions', encodedData);
-  }
-
-  Future<bool> login(String email, String password) async {
-    // In a real DB, verify password. Here we simulate.
-    final usersJson = _prefs?.getString('users') ?? '{}';
-    Map<String, dynamic> users = json.decode(usersJson);
-    
-    if (users.containsKey(email)) {
-      // Simulate successful login
-      currentUser = User.fromMap(users[email]);
-      await _prefs?.setString('current_user', json.encode(currentUser!.toMap()));
-      return true;
-    }
-    return false;
-  }
-
-  Future<bool> signup(String name, String email, String password) async {
-    final usersJson = _prefs?.getString('users') ?? '{}';
-    Map<String, dynamic> users = json.decode(usersJson);
-
-    if (users.containsKey(email)) {
-      return false; // User exists
-    }
-
-    final newUser = User(id: DateTime.now().millisecondsSinceEpoch.toString(), name: name, email: email);
-    users[email] = newUser.toMap();
-    await _prefs?.setString('users', json.encode(users));
-    
-    currentUser = newUser;
-    await _prefs?.setString('current_user', json.encode(currentUser!.toMap()));
-    return true;
-  }
-
-  Future<void> logout() async {
-    currentUser = null;
-    await _prefs?.remove('current_user');
-  }
-
-  Future<void> updateUser(User user) async {
-    if (currentUser?.email != null) {
-      currentUser = user;
-      await _prefs?.setString('current_user', json.encode(currentUser!.toMap()));
-      
-      final usersJson = _prefs?.getString('users') ?? '{}';
-      Map<String, dynamic> users = json.decode(usersJson);
-      users[user.email] = user.toMap();
-      await _prefs?.setString('users', json.encode(users));
-    }
-  }
-
-  // MOCK DATA for Categories
-  List<Category> getCategories() {
-    return [
-      Category(id: 1, name: 'Sport', totalQuestions: 10, iconName: 'sports_soccer'),
-      Category(id: 2, name: 'Ilm-fan', totalQuestions: 10, iconName: 'science'),
-      Category(id: 3, name: 'Tarix', totalQuestions: 10, iconName: 'account_balance'),
-      Category(id: 4, name: 'Kinolar', totalQuestions: 10, iconName: 'movie'),
-      Category(id: 5, name: 'Musiqa', totalQuestions: 10, iconName: 'music_note'),
-      Category(id: 6, name: 'Umumiy', totalQuestions: 10, iconName: 'help'),
-    ];
-  }
-
-  final List<Question> _defaultQuestions = [
-    // Sport (ID: 1)
-    Question(id: 1, categoryId: 1, questionText: 'Qaysi sport turi millionlar oyini deb ataladi?', optionA: 'Basketbol', optionB: 'Tennis', optionC: 'Futbol', optionD: 'Golf', correctOption: 'C'),
-    Question(id: 2, categoryId: 1, questionText: 'Futbol jamoasida nechta oyinchi boladi?', optionA: '9', optionB: '10', optionC: '11', optionD: '12', correctOption: 'C'),
-    Question(id: 3, categoryId: 1, questionText: 'Jahon chempionatida eng kop qaysi davlat golib bolgan?', optionA: 'Germaniya', optionB: 'Italiya', optionC: 'Argentina', optionD: 'Braziliya', correctOption: 'D'),
-
-    // Ilm-fan (ID: 2)
-    Question(id: 11, categoryId: 2, questionText: 'Qizil sayyora qaysi?', optionA: 'Yer', optionB: 'Mars', optionC: 'Yupiter', optionD: 'Saturn', correctOption: 'B'),
-    Question(id: 12, categoryId: 2, questionText: 'Oltinning kimyoviy belgisi qanday?', optionA: 'Au', optionB: 'Ag', optionC: 'Fe', optionD: 'O', correctOption: 'A'),
-    Question(id: 13, categoryId: 2, questionText: 'Suv necha gradusda qaynaydi?', optionA: '50', optionB: '100', optionC: '150', optionD: '200', correctOption: 'B'),
-
-    // Tarix (ID: 3)
-    Question(id: 21, categoryId: 3, questionText: 'Amerikani kim kashf qilgan?', optionA: 'Leif Erikson', optionB: 'Xristofor Kolumb', optionC: 'Marko Polo', optionD: 'Jeyms Kuk', correctOption: 'B'),
-    Question(id: 22, categoryId: 3, questionText: 'Ikkinchi jahon urushi qachon tugagan?', optionA: '1945', optionB: '1939', optionC: '1918', optionD: '1965', correctOption: 'A'),
-    Question(id: 23, categoryId: 3, questionText: 'Amir Temur qachon tugilgan?', optionA: '1336', optionB: '1405', optionC: '1441', optionD: '1370', correctOption: 'A'),
-
-    // Kinolar (ID: 4)
-    Question(id: 31, categoryId: 4, questionText: 'Titanik kinosida Jek rolini kim oynagan?', optionA: 'Bred Pitt', optionB: 'Jonni Depp', optionC: 'Leonardo Di Kaprio', optionD: 'Tom Kruz', correctOption: 'C'),
-    Question(id: 32, categoryId: 4, questionText: '"Sherik" kinosida Mufasaning ukasi kim?', optionA: 'Skar', optionB: 'Zazu', optionC: 'Simba', optionD: 'Rafiki', correctOption: 'A'),
-    Question(id: 33, categoryId: 4, questionText: 'Matritsa kinosida Neo qanday rangli dori ichadi?', optionA: 'Qizil', optionB: 'Kok', optionC: 'Yashil', optionD: 'Sariq', correctOption: 'A'),
-
-    // Musiqa (ID: 5)
-    Question(id: 41, categoryId: 5, questionText: 'Pop qiroli kim?', optionA: 'Elvis Presli', optionB: 'Maykl Jekson', optionC: 'Prins', optionD: 'Stivi Uonder', correctOption: 'B'),
-    Question(id: 42, categoryId: 5, questionText: 'Gitara odatda nechta torga ega?', optionA: '4', optionB: '5', optionC: '6', optionD: '7', correctOption: 'C'),
-    Question(id: 43, categoryId: 5, questionText: 'Qaysi asbob oq va qora tugmalarga ega?', optionA: 'Gitara', optionB: 'Pianino', optionC: 'Nogora', optionD: 'Skaypka', correctOption: 'B'),
-
-    // Umumiy (ID: 6)
-    Question(id: 51, categoryId: 6, questionText: 'Yerdagi eng katta okean qaysi?', optionA: 'Atlantika', optionB: 'Hind', optionC: 'Shimoliy Muz', optionD: 'Tinch', correctOption: 'D'),
-    Question(id: 52, categoryId: 6, questionText: 'Dunyodagi eng baland tog?', optionA: 'K2', optionB: 'Everest', optionC: 'Kilimanjaro', optionD: 'Monblan', correctOption: 'B'),
-    Question(id: 53, categoryId: 6, questionText: 'Dunyodagi eng uzun daryo qaysi?', optionA: 'Amazonka', optionB: 'Nil', optionC: 'Yantszi', optionD: 'Missisipi', correctOption: 'B'),
-  ];
-
-  // MOCK DATA for Questions
-  List<Question> getQuestionsForCategory(int categoryId) {
-    return _allQuestions.where((q) => q.categoryId == categoryId).toList();
-  }
-
-  // --- ADMIN METHODS --- //
-  
-  List<Question> getAllQuestions() {
-    return _allQuestions.toList();
-  }
-
-  Future<void> addQuestion(Question q) async {
-    _allQuestions.add(q);
-    await _saveQuestions();
-  }
-
-  Future<void> deleteQuestion(int id) async {
-    _allQuestions.removeWhere((q) => q.id == id);
-    await _saveQuestions();
-  }
-
-  List<User> getAllUsers() {
-    final usersJson = _prefs?.getString('users');
-    if (usersJson == null) return [];
-    
-    Map<String, dynamic> usersMap = json.decode(usersJson);
-    return usersMap.values.map((u) => User.fromMap(u)).toList();
-  }
 }
