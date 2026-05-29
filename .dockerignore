@@ -1,0 +1,8 @@
+.idea/
+.dart_tool/
+.git/
+build/
+code_snippets/
+*.png
+*.webp
+*.iml
